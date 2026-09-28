@@ -70,12 +70,13 @@ python build.py
 
 ### 아이콘 바꾸기
 
-`app.ico`는 `icon.png`에서 만든 것입니다. 다른 모양으로 바꾸려면:
+`app.ico`는 `icon.png`의 달력 카드 부분을 둥근 모서리대로 잘라 만든 것입니다. `icon.png`를 바꾼 뒤 다시 만들려면:
 
 ```
-python make_icon.py        # icon_options\preview.png 에 후보 비교표 생성
-python make_icon.py A      # A안으로 app.ico 다시 만들기 (A 얼굴 / B 상반신 / C 전신 / D 원형 배지)
+python make_icon.py        # app.ico 생성 + icon_options\preview.png 에 크기별 미리보기
 ```
+
+카드 위치는 `make_icon.py` 위쪽의 `CARD_*` 값으로 정합니다. 구도가 다른 그림을 쓸 때는 이 값을 맞춰 주세요.
 
 Windows 탐색기는 아이콘을 캐시하므로, 바꾼 뒤에도 예전 아이콘이 보이면 exe 이름을 바꾸거나 다시 로그인하면 반영됩니다.
 
@@ -150,4 +151,4 @@ This program will not transfer any information to other networked systems unless
 
 소스 코드는 [MIT License](LICENSE)로 배포합니다.
 
-아이콘 그림(`icon.png`, `app.ico`)은 동방 프로젝트의 하쿠레이 레이무 팬아트로, MIT License가 적용되지 않으며 권리는 원작자에게 있습니다.
+아이콘 그림(`icon.png`, `app.ico`)은 동방 프로젝트의 캐릭터 하쿠레이 레이무를 그린 비상업 2차 창작 이미지입니다. 캐릭터에 대한 권리는 원작자(ZUN / 상하이 앨리스 환악단)에게 있으며, 이 그림에는 MIT License가 적용되지 않습니다.

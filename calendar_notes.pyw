@@ -13,6 +13,9 @@
   Ctrl+T           오늘로 이동
   Ctrl+S           즉시 저장
   더블클릭          해당 날짜 선택 후 바로 입력
+  Ctrl+Alt+Space   (어디서든) 오늘 메모 바로 쓰기 — Esc 로 하던 창으로 복귀
+                   다른 프로그램이 쓰는 중이면 다른 후보로 자동 대체, 우클릭 메뉴에서 변경
+  F1               사용법 안내
   우클릭            설정 메뉴 (자동 숨김 / 흐림 / 창 위치 / 자동 실행 / 종료)
 
 창에 마우스가 없고 다른 창을 쓰는 중이면 버튼·메모 칸이 숨고 달력만 보인다.
@@ -82,9 +85,9 @@ try:
                                QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen,
                                QShortcut, QTextCursor)
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
-    from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMainWindow, QMenu,
-                                   QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy,
-                                   QSplitter, QSystemTrayIcon, QVBoxLayout, QWidget)
+    from PySide6.QtWidgets import (QApplication, QDialog, QGridLayout, QHBoxLayout, QLabel,
+                                   QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
+                                   QSizePolicy, QSplitter, QSystemTrayIcon, QVBoxLayout, QWidget)
 except ImportError:
     log.critical("PySide6 import 실패 — 'pip install PySide6' 필요", exc_info=True)
     raise SystemExit(1)
@@ -164,6 +167,29 @@ QMenu::item { padding: 6px 22px 6px 26px; color: #2B1D21; border-radius: 4px; }
 QMenu::item:selected { background: #FBE3E7; color: #9E1027; }
 QMenu::indicator { left: 6px; width: 14px; height: 14px; }
 QToolTip { background: #FFFFFF; color: #2B1D21; border: 1px solid rgba(200,16,46,90); }
+QLabel#guideTitle { font-size: 24px; font-weight: 700; color: #B3122C; }
+QLabel#guideSub   { font-size: 13px; color: #8C7479; }
+QLabel#section    { font-size: 16px; font-weight: 700; color: #2B1D21; padding-top: 4px; }
+QWidget#card {
+    background: rgba(255,255,255,215); border: 1px solid rgba(200,16,46,40);
+    border-left: 4px solid #C8102E; border-radius: 10px;
+}
+QLabel#cardTitle { font-size: 15px; font-weight: 700; color: #B3122C; }
+QLabel#cardText  { font-size: 13px; color: #4A363C; }
+QLabel#key {
+    background: #FFFFFF; border: 1px solid rgba(200,16,46,80); border-bottom: 3px solid rgba(200,16,46,80);
+    border-radius: 6px; padding: 2px 8px; color: #9E1027; font-size: 12px; font-weight: 700;
+}
+QLabel#keyDesc { font-size: 13px; color: #2B1D21; }
+QLabel#keyWarn { font-size: 12px; color: #C0392B; }
+QWidget#recBox { background: rgba(200,16,46,18); border: 1px dashed rgba(200,16,46,110); border-radius: 10px; }
+QLabel#recText { font-size: 13px; color: #2B1D21; }
+QPushButton#primary {
+    background: #C8102E; color: #FFFFFF; border: none; border-radius: 8px;
+    padding: 7px 18px; font-size: 13px; font-weight: 700;
+}
+QPushButton#primary:hover    { background: #A90D26; }
+QPushButton#primary:disabled { background: rgba(200,16,46,110); color: #FFFFFF; }
 """
 
 
@@ -244,6 +270,63 @@ def set_window_layer(hwnd: int, layer: str) -> None:
                             _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE)
     except (AttributeError, OSError):
         log.warning("창 위치 설정 실패: %s", layer, exc_info=True)
+
+
+# 빠른 메모 전역 단축키. 다른 프로그램이 이미 쓰는 키는 등록이 안 되므로 후보 중에서 고른다.
+# (개발 도구와 겹치는 Ctrl+Alt+M/N, Ctrl+Shift+Space, 입력 언어 전환인 Alt+Shift 조합은 뺌)
+_MOD_ALT, _MOD_CONTROL, _MOD_WIN, _MOD_NOREPEAT = 0x1, 0x2, 0x8, 0x4000
+HOTKEYS = {  # 설정 값 → (표시, 수정키, 가상 키 코드)
+    "ctrl+alt+space": ("Ctrl + Alt + Space", _MOD_CONTROL | _MOD_ALT, 0x20),
+    "ctrl+alt+enter": ("Ctrl + Alt + Enter", _MOD_CONTROL | _MOD_ALT, 0x0D),
+    "ctrl+alt+`": ("Ctrl + Alt + `", _MOD_CONTROL | _MOD_ALT, 0xC0),
+    "win+alt+n": ("Win + Alt + N", _MOD_WIN | _MOD_ALT, ord("N")),
+}
+DEFAULT_HOTKEY = "ctrl+alt+space"
+_HOTKEY_ID, _PROBE_ID = 1, 2
+_WM_HOTKEY = 0x0312
+
+
+def register_hotkey(hwnd: int, key: str) -> bool:
+    """hwnd 에 빠른 메모 단축키를 (다시) 등록. 이전 등록은 먼저 푼다."""
+    if sys.platform != "win32" or key not in HOTKEYS:
+        return False
+    _, mods, vk = HOTKEYS[key]
+    try:
+        user32 = ctypes.windll.user32
+        user32.UnregisterHotKey(ctypes.c_void_p(hwnd), _HOTKEY_ID)
+        return bool(user32.RegisterHotKey(ctypes.c_void_p(hwnd), _HOTKEY_ID, mods | _MOD_NOREPEAT, vk))
+    except (AttributeError, OSError):
+        log.warning("단축키 등록 오류: %s", key, exc_info=True)
+        return False
+
+
+def hotkey_available(key: str) -> bool:
+    """다른 프로그램이 쓰고 있지 않은지 (잠깐 등록했다가 바로 푼다)."""
+    if sys.platform != "win32":
+        return False
+    _, mods, vk = HOTKEYS[key]
+    user32 = ctypes.windll.user32
+    if user32.RegisterHotKey(None, _PROBE_ID, mods | _MOD_NOREPEAT, vk):
+        user32.UnregisterHotKey(None, _PROBE_ID)
+        return True
+    return False
+
+
+def foreground_window() -> int:
+    if sys.platform != "win32":
+        return 0
+    fn = ctypes.windll.user32.GetForegroundWindow
+    fn.restype = ctypes.c_void_p  # 64비트 핸들이 int 로 잘리지 않게
+    return fn() or 0
+
+
+def activate_window(hwnd: int) -> None:
+    """빠른 메모를 마치고 원래 쓰던 창으로 돌려보낸다."""
+    if sys.platform != "win32" or not hwnd:
+        return
+    user32 = ctypes.windll.user32
+    if user32.IsWindow(ctypes.c_void_p(hwnd)):
+        user32.SetForegroundWindow(ctypes.c_void_p(hwnd))
 
 
 # Windows 시작 시 자동 실행 (HKCU Run — 관리자 권한 불필요)
@@ -618,10 +701,11 @@ class GlassRoot(QWidget):
     EDGE = 7          # 크기 조절을 잡는 가장자리 두께(px)
     RADIUS = 8        # Win11 둥근 모서리와 맞춤
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, resizable: bool = True):
         super().__init__(parent)
         self.blurred = False  # 창 뒤 흐림이 켜졌으면 바탕을 더 투명하게
-        self.setMouseTracking(True)
+        self.resizable = resizable
+        self.setMouseTracking(resizable)
 
     def paintEvent(self, _event) -> None:
         p = QPainter(self)
@@ -650,7 +734,7 @@ class GlassRoot(QWidget):
 
     def _edges_at(self, pos) -> Qt.Edge:
         edges = Qt.Edge(0)
-        if self.window().isMaximized():
+        if not self.resizable or self.window().isMaximized():
             return edges
         m = self.EDGE
         if pos.x() < m:
@@ -686,7 +770,7 @@ class GlassRoot(QWidget):
 
 
 class TitleBar(QWidget):
-    """상단 바. 빈 곳을 끌면 창 이동, 더블클릭하면 최대화/복원."""
+    """상단 바. 빈 곳을 끌면 창 이동, (메인 창이면) 더블클릭하면 최대화/복원."""
 
     def mousePressEvent(self, e) -> None:
         if e.button() == Qt.LeftButton:
@@ -695,9 +779,168 @@ class TitleBar(QWidget):
             super().mousePressEvent(e)
 
     def mouseDoubleClickEvent(self, e) -> None:
-        if e.button() == Qt.LeftButton:
-            w = self.window()
+        w = self.window()
+        if e.button() == Qt.LeftButton and isinstance(w, QMainWindow):
             w.showNormal() if w.isMaximized() else w.showMaximized()
+
+
+# ─────────────────────────────── 사용법 안내 ───────────────────────────────
+GUIDE_CARDS = [
+    ("적기만 하면 끝",
+     "날짜를 누르고 적으세요. 저장 버튼 없이 바로 저장되고, 저장 중에 전원이 꺼져도 메모가 깨지지 않아요."),
+    ("어디서든 1초 메모",
+     "다른 프로그램을 쓰다가 {hotkey}를 누르면 오늘 메모가 바로 열려요. 다 적고 Esc를 누르면 하던 일로 돌아가요."),
+    ("평소엔 달력만",
+     "안 쓸 땐 버튼과 메모 칸이 숨어서 바탕화면 달력처럼 깔끔해요. 설날·추석 같은 공휴일도 알아서 표시해요."),
+    ("내 PC에만 저장",
+     "계정도, 인터넷 연결도 없어요. 메모는 이 PC 안에만 저장되고 어디로도 보내지 않아요."),
+]
+GUIDE_KEYS = [
+    ("날짜 클릭", "그날 메모 보기·쓰기"),
+    ("날짜 더블클릭", "바로 입력"),
+    ("{hotkey}", "어디서든 오늘 메모 (Esc로 복귀)"),
+    ("휠  ·  Alt + ← →", "이전 / 다음 달"),
+    ("Ctrl + T", "오늘로 이동"),
+    ("우클릭", "설정 (창 위치, 자동 실행 …)"),
+    ("×", "트레이로 숨기기 (끄기: 우클릭 → 종료)"),
+    ("F1", "이 안내 다시 보기"),
+]
+
+
+class GuideDialog(QDialog):
+    """왜 좋은지 + 쓰는 법. 처음 실행 때 한 번 뜨고, F1·우클릭·트레이 메뉴로 다시 열 수 있다.
+
+    바탕화면 고정 중인 메인 창에 묶이면 같이 뒤로 깔리므로 부모 없는 독립 창으로 띄운다.
+    """
+
+    def __init__(self, win: "MainWindow"):
+        super().__init__(None)
+        self.win = win
+        self.setWindowTitle("Reimu Calendar 사용법")
+        self.setWindowIcon(win.windowIcon())
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.root = GlassRoot(resizable=False)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self.root)
+        v = QVBoxLayout(self.root)
+        v.setContentsMargins(26, 14, 26, 22)
+        v.setSpacing(10)
+
+        # 제목 (끌어서 이동)
+        bar = TitleBar()
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(0, 6, 0, 0)
+        h.setSpacing(12)
+        icon = QLabel()
+        icon.setPixmap(win.windowIcon().pixmap(48, 48))
+        titles = QVBoxLayout()
+        titles.setSpacing(0)
+        titles.addWidget(QLabel("Reimu Calendar", objectName="guideTitle"))
+        titles.addWidget(QLabel(f"v{__version__}  ·  적기만 하면 되는 바탕화면 달력", objectName="guideSub"))
+        close = QPushButton("×", objectName="closeBtn")
+        close.setCursor(Qt.PointingHandCursor)
+        close.setFocusPolicy(Qt.NoFocus)
+        close.clicked.connect(self.close)
+        h.addWidget(icon)
+        h.addLayout(titles)
+        h.addStretch(1)
+        h.addWidget(close, 0, Qt.AlignTop)
+        v.addWidget(bar)
+
+        # 이래서 편해요
+        v.addWidget(QLabel("이래서 편해요", objectName="section"))
+        cards = QGridLayout()
+        cards.setSpacing(10)
+        hotkey = win.hotkey_text
+        for i, (title, text) in enumerate(GUIDE_CARDS):
+            text = text.format(hotkey=hotkey)
+            card = QWidget(objectName="card")
+            card.setAttribute(Qt.WA_StyledBackground, True)
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(14, 10, 14, 12)
+            cl.setSpacing(4)
+            body = QLabel(text, objectName="cardText")
+            body.setWordWrap(True)
+            cl.addWidget(QLabel(title, objectName="cardTitle"))
+            cl.addWidget(body, 1)
+            cards.addWidget(card, i // 2, i % 2)
+        v.addLayout(cards)
+
+        # 쓰는 법
+        v.addWidget(QLabel("쓰는 법", objectName="section"))
+        keys = QGridLayout()
+        keys.setHorizontalSpacing(12)
+        keys.setVerticalSpacing(8)
+        half = (len(GUIDE_KEYS) + 1) // 2
+        for i, (key, desc) in enumerate(GUIDE_KEYS):
+            row, col = i % half, (i // half) * 2
+            keys.addWidget(QLabel(key.format(hotkey=hotkey), objectName="key"), row, col, Qt.AlignLeft)
+            keys.addWidget(QLabel(desc, objectName="keyDesc"), row, col + 1)
+        keys.setColumnStretch(1, 1)
+        keys.setColumnStretch(3, 1)
+        v.addLayout(keys)
+        note = None
+        if win.hotkey is None:
+            note = "※ 빠른 메모 단축키 후보를 모두 다른 프로그램이 쓰고 있어서 지금은 동작하지 않아요."
+        elif win.hotkey != win.hotkey_wanted:
+            note = (f"※ {HOTKEYS[win.hotkey_wanted][0]}는 다른 프로그램이 쓰고 있어서 {hotkey}로 대신 쓰고 있어요. "
+                    "우클릭 → 빠른 메모 단축키에서 바꿀 수 있어요.")
+        if note:
+            warn = QLabel(note, objectName="keyWarn")
+            warn.setWordWrap(True)
+            v.addWidget(warn)
+
+        # 추천 설정
+        rec = QWidget(objectName="recBox")
+        rec.setAttribute(Qt.WA_StyledBackground, True)
+        rl = QHBoxLayout(rec)
+        rl.setContentsMargins(14, 10, 10, 10)
+        rec_text = QLabel("<b>추천 설정</b> — 바탕화면에 고정 + Windows 시작 시 자동 실행<br>"
+                          "컴퓨터를 켜면 바탕화면에 달력이 깔려 있어요.", objectName="recText")
+        self.rec_btn = QPushButton("추천 설정 켜기", objectName="primary")
+        self.rec_btn.setCursor(Qt.PointingHandCursor)
+        self.rec_btn.clicked.connect(self._apply_recommended)
+        rl.addWidget(rec_text, 1)
+        rl.addWidget(self.rec_btn)
+        v.addWidget(rec)
+        self._refresh_rec()
+
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        start = QPushButton("시작하기")
+        start.setCursor(Qt.PointingHandCursor)
+        start.clicked.connect(self.close)
+        bottom.addWidget(start)
+        v.addLayout(bottom)
+
+        QShortcut(QKeySequence("Esc"), self, activated=self.close)
+        self.setFixedWidth(760)
+        self.adjustSize()
+
+    def _recommended_on(self) -> bool:
+        autostart = sys.platform != "win32" or get_autostart() is not None
+        return self.win.layer == LAYER_BOTTOM and autostart
+
+    def _refresh_rec(self) -> None:
+        on = self._recommended_on()
+        self.rec_btn.setEnabled(not on)
+        self.rec_btn.setText("켜져 있어요" if on else "추천 설정 켜기")
+
+    def _apply_recommended(self) -> None:
+        self.win.set_layer(LAYER_BOTTOM)
+        if sys.platform == "win32" and not set_autostart(True):
+            QMessageBox.warning(self, "자동 실행", f"자동 실행 설정을 바꾸지 못했습니다.\n로그: {LOG_FILE}")
+        self._refresh_rec()
+
+    def showEvent(self, e) -> None:
+        super().showEvent(e)
+        self.root.blurred = apply_window_effects(int(self.winId()), self.win.blur)
+        self.root.update()
+        # 메인 창이 있는 화면 가운데
+        screen = (self.win.screen() or QApplication.primaryScreen()).availableGeometry()
+        self.move(screen.center() - self.rect().center())
 
 
 # ─────────────────────────────── 메인 창 ───────────────────────────────
@@ -720,6 +963,15 @@ class MainWindow(QMainWindow):
         self._split_state = None  # 메모 칸을 숨기기 직전의 분할 비율
         self._pin_suspended = False  # 바탕화면 고정 중 트레이에서 불러와 잠깐 앞에 나온 상태
         self._quitting = False       # True 면 닫기 = 종료, False 면 닫기 = 트레이로 숨기기
+        self._quick = False          # 전역 단축키로 불러온 빠른 메모 중
+        self._quick_prev = 0         # 빠른 메모 전에 쓰던 창 (Esc 로 돌아갈 곳)
+        self._quick_active_seen = False
+        self._quick_was_hidden = False
+        self.hotkey_wanted = self.settings.value("hotkey", DEFAULT_HOTKEY, type=str)
+        if self.hotkey_wanted not in HOTKEYS:
+            self.hotkey_wanted = DEFAULT_HOTKEY
+        self.hotkey = None  # 실제로 등록된 단축키 (None = 못 씀)
+        self._guide = None
         self.holidays = KoreanHolidays()
         self.setWindowTitle("달력 메모")
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
@@ -828,6 +1080,8 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Alt+Right"), self, activated=lambda: self.view.shift_month(1))
         QShortcut(QKeySequence("Ctrl+T"), self, activated=lambda: self.select_date(date.today()))
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self._save_now)
+        QShortcut(QKeySequence("Esc"), self, activated=self.leave_quick)
+        QShortcut(QKeySequence("F1"), self, activated=self.show_guide)
 
         # 트레이 아이콘 (없는 환경이면 닫기 = 종료)
         self.tray = None
@@ -836,6 +1090,8 @@ class MainWindow(QMainWindow):
             self.tray.setToolTip("Reimu Calendar")
             tray_menu = QMenu(self)
             tray_menu.addAction("달력 열기", self.show_from_tray)
+            self._tray_quick = tray_menu.addAction("오늘 메모 쓰기", self.quick_note)
+            tray_menu.addAction("사용법  (F1)", self.show_guide)
             tray_menu.addSeparator()
             tray_menu.addAction("종료", self.quit_app)
             self.tray.setContextMenu(tray_menu)
@@ -878,18 +1134,21 @@ class MainWindow(QMainWindow):
         log.info("창 위치: %s", layer)
 
     def nativeEvent(self, event_type, message):
-        # 바탕화면 고정: 클릭·활성화 등으로 앞에 나오려 할 때마다 맨 뒤로 되돌린다
-        if (self.layer == LAYER_BOTTOM and not self._pin_suspended
-                and bytes(event_type) == b"windows_generic_MSG"):
+        if bytes(event_type) == b"windows_generic_MSG":
             msg = wintypes.MSG.from_address(int(message))
-            if msg.message == _WM_WINDOWPOSCHANGING and msg.lParam:
+            if msg.message == _WM_HOTKEY and msg.wParam == _HOTKEY_ID:
+                QTimer.singleShot(0, self.quick_note)  # 네이티브 메시지 처리 밖에서 창 전환
+                return True, 0
+            # 바탕화면 고정: 클릭·활성화 등으로 앞에 나오려 할 때마다 맨 뒤로 되돌린다
+            if (msg.message == _WM_WINDOWPOSCHANGING and msg.lParam
+                    and self.layer == LAYER_BOTTOM and not self._pin_suspended):
                 pos = _WindowPos.from_address(msg.lParam)
                 if not pos.flags & _SWP_NOZORDER:
                     pos.hwndInsertAfter = _HWND_BOTTOM
         return super().nativeEvent(event_type, message)
 
     def _want_compact(self) -> bool:
-        if not self.auto_hide or self.isMinimized():
+        if not self.auto_hide or self.isMinimized() or self._quick:
             return False
         if self.isActiveWindow() or QApplication.activePopupWidget() is not None:
             return False
@@ -925,6 +1184,12 @@ class MainWindow(QMainWindow):
     def changeEvent(self, e) -> None:
         super().changeEvent(e)
         if e.type() == QEvent.ActivationChange:
+            if self._quick and self.isActiveWindow():
+                self._quick_active_seen = True
+            elif self._quick and self._quick_active_seen:
+                self._quick = False  # 다른 창을 눌러 빠져나감 — 창은 그대로 두고 빠른 메모만 끝
+                if self.save_timer.isActive():
+                    self._save_now()
             if self._pin_suspended and not self.isActiveWindow():
                 self._pin_suspended = False  # 다 쓰고 다른 창으로 가면 다시 바탕화면으로
                 set_window_layer(int(self.winId()), self.layer)
@@ -954,12 +1219,26 @@ class MainWindow(QMainWindow):
             group.addAction(a)
             layer_actions[a] = layer
 
+        hotkey_actions = {}
+        if sys.platform == "win32":
+            hk_menu = menu.addMenu("빠른 메모 단축키")
+            hk_group = QActionGroup(hk_menu)
+            for key, (label, _, _) in HOTKEYS.items():
+                usable = key == self.hotkey or hotkey_available(key)
+                a = hk_menu.addAction(label if usable else f"{label}  (다른 프로그램이 사용 중)")
+                a.setCheckable(True)
+                a.setChecked(key == self.hotkey)
+                a.setEnabled(usable)
+                hk_group.addAction(a)
+                hotkey_actions[a] = key
+
         a_auto = None
         if sys.platform == "win32":
             a_auto = menu.addAction("Windows 시작 시 자동 실행")
             a_auto.setCheckable(True)
             a_auto.setChecked(get_autostart() is not None)
         menu.addSeparator()
+        a_guide = menu.addAction("사용법  (F1)")
         a_quit = menu.addAction("종료")
 
         chosen = menu.exec(e.globalPos())
@@ -976,11 +1255,89 @@ class MainWindow(QMainWindow):
             self.root.update()
         elif chosen in layer_actions:
             self.set_layer(layer_actions[chosen])
+        elif chosen in hotkey_actions:
+            self.change_hotkey(hotkey_actions[chosen])
         elif chosen is a_auto:
             if not set_autostart(a_auto.isChecked()):
                 QMessageBox.warning(self, "자동 실행", f"자동 실행 설정을 바꾸지 못했습니다.\n로그: {LOG_FILE}")
+        elif chosen is a_guide:
+            self.show_guide()
         elif chosen is a_quit:
             self.quit_app()
+
+    # ── 빠른 메모 / 사용법 ──
+    @property
+    def hotkey_text(self) -> str:
+        return HOTKEYS[self.hotkey][0] if self.hotkey else "(단축키 없음)"
+
+    def register_global_hotkey(self) -> None:
+        """원하는 키부터 시도하고, 다른 프로그램이 쓰고 있으면 나머지 후보 중 빈 키로."""
+        hwnd = int(self.winId())
+        order = [self.hotkey_wanted] + [k for k in HOTKEYS if k != self.hotkey_wanted]
+        self.hotkey = next((k for k in order if register_hotkey(hwnd, k)), None)
+        if self.hotkey is None:
+            log.warning("빠른 메모 단축키 후보를 모두 다른 프로그램이 사용 중 — 단축키 없음")
+        elif self.hotkey != self.hotkey_wanted:
+            log.warning("%s 는 다른 프로그램이 사용 중 → %s 로 대체",
+                        HOTKEYS[self.hotkey_wanted][0], self.hotkey_text)
+        else:
+            log.info("빠른 메모 단축키: %s", self.hotkey_text)
+        self._update_hotkey_labels()
+
+    def change_hotkey(self, key: str) -> None:
+        if register_hotkey(int(self.winId()), key):
+            self.hotkey = self.hotkey_wanted = key
+            self.settings.setValue("hotkey", key)
+            log.info("빠른 메모 단축키 변경: %s", self.hotkey_text)
+        else:
+            QMessageBox.warning(self, "빠른 메모 단축키",
+                                f"{HOTKEYS[key][0]}는 다른 프로그램이 쓰고 있어서 쓸 수 없습니다.")
+            if self.hotkey:
+                register_hotkey(int(self.winId()), self.hotkey)  # 원래 키 복구
+        self._update_hotkey_labels()
+
+    def _update_hotkey_labels(self) -> None:
+        if self.tray is not None:
+            self._tray_quick.setText(f"오늘 메모 쓰기  ({self.hotkey_text})" if self.hotkey else "오늘 메모 쓰기")
+
+    def quick_note(self) -> None:
+        """어디서든 단축키 → 오늘 메모에 바로 커서. 한 번 더 누르면 원래 창으로."""
+        if self._quick and self.isActiveWindow():
+            self.leave_quick()
+            return
+        prev = foreground_window()
+        self._quick_prev = prev if prev != int(self.winId()) else 0
+        self._quick_was_hidden = not self.isVisible() or self.isMinimized()
+        self._quick = True
+        self._quick_active_seen = False  # 실제로 활성화되기 전의 비활성 이벤트로 끝나지 않게
+        self.show_from_tray()
+        self._apply_mode()  # 달력만 보이던 상태였어도 메모 칸을 바로 펼침
+        self.select_date(date.today())
+        self.editor.setFocus()
+        self.editor.moveCursor(QTextCursor.End)
+        log.debug("빠른 메모 시작 (이전 창 %s)", self._quick_prev)
+
+    def leave_quick(self) -> None:
+        """Esc: 저장하고 빠른 메모 전 상태(쓰던 창, 트레이에 숨어 있었다면 다시 숨김)로."""
+        if not self._quick:
+            return
+        self._quick = False
+        if self.save_timer.isActive():
+            self._save_now()
+        if self._quick_was_hidden:
+            self.hide()
+        activate_window(self._quick_prev)
+        self._schedule_mode()
+
+    def show_guide(self) -> None:
+        if self._guide is not None:  # 단축키·설정이 바뀌었을 수 있으니 매번 새로
+            self._guide.close()
+            self._guide.deleteLater()
+        self._guide = GuideDialog(self)
+        self._guide.show()
+        self._guide.raise_()
+        self._guide.activateWindow()
+        self.settings.setValue("guideShown", True)
 
     # ── 트레이 / 종료 ──
     def _on_tray_activated(self, reason) -> None:
@@ -1015,6 +1372,12 @@ class MainWindow(QMainWindow):
             QApplication.quit()
         else:
             self._quitting = False  # 저장 실패로 사용자가 종료를 취소함
+
+    def prepare_session_end(self) -> None:
+        """Windows 종료·로그오프 직전. 닫기를 트레이로 돌리면 종료를 막게 되므로 '진짜 종료'로 바꾼다."""
+        log.info("Windows 종료/로그오프 — 저장하고 종료 준비")
+        self._quitting = True
+        self.persist()
 
     def persist(self) -> None:
         """메모·창 위치·분할 비율 저장 (종료 직전 / Windows 로그오프 시)."""
@@ -1159,12 +1522,15 @@ def main() -> int:
     win = MainWindow(store)
     start_instance_server(win)  # 창이 부모라 창과 같이 유지됨
     app.aboutToQuit.connect(win.persist)
-    app.commitDataRequest.connect(lambda _m: win.persist())  # Windows 로그오프/종료
+    app.commitDataRequest.connect(lambda _m: win.prepare_session_end())  # Windows 로그오프/종료
     if autostarted:  # 부팅 직후엔 포커스를 뺏지 않고 달력만
         win.setAttribute(Qt.WA_ShowWithoutActivating, True)
     win.show()
+    win.register_global_hotkey()
     if autostarted:
         win._apply_mode()
+    elif not win.settings.value("guideShown", False, type=bool):
+        QTimer.singleShot(500, win.show_guide)  # 처음 실행이면 사용법 안내
     if store.problem:
         QTimer.singleShot(0, lambda: QMessageBox.warning(win, "메모 파일 문제", store.problem))
     rc = app.exec()

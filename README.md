@@ -51,13 +51,22 @@ python calendar_notes.pyw
 ## exe로 빌드하기
 
 ```
-pip install pyinstaller
-python -m PyInstaller --onefile --noconsole --name 달력메모 --icon app.ico --add-data "app.ico;." calendar_notes.pyw
+pip install -r requirements.txt pyinstaller
+python build.py
 ```
 
-빌드가 끝나면 `dist\달력메모.exe`가 생깁니다. 이 파일 하나만 있으면 Python 없이 실행됩니다.
+빌드가 끝나면 `dist\reimu-calendar.exe`가 생깁니다. 이 파일 하나만 있으면 Python 없이 실행됩니다.
+`build.py`는 아이콘과 exe 파일 속성(제품 이름, 버전)까지 넣어서 빌드합니다. 버전은 `calendar_notes.pyw`의 `__version__`을 따릅니다.
 
-`--icon`은 exe 파일 아이콘, `--add-data`는 실행 중 창·작업표시줄 아이콘에 쓰입니다.
+### 새 버전 배포하기 (관리자용)
+
+1. `calendar_notes.pyw`의 `__version__`을 올립니다. 예: `"1.0.2"`
+2. 커밋하고, 같은 번호로 태그를 올립니다.
+   ```
+   git tag v1.0.2
+   git push origin main v1.0.2
+   ```
+3. GitHub Actions가 exe를 빌드합니다. SignPath가 설정되어 있으면 서명한 뒤 Releases에 올립니다. 태그와 `__version__`이 다르면 빌드가 멈춥니다.
 
 ### 아이콘 바꾸기
 
@@ -70,7 +79,7 @@ python make_icon.py A      # A안으로 app.ico 다시 만들기 (A 얼굴 / B �
 
 Windows 탐색기는 아이콘을 캐시하므로, 바꾼 뒤에도 예전 아이콘이 보이면 exe 이름을 바꾸거나 다시 로그인하면 반영됩니다.
 
-`--onefile` 빌드는 실행할 때마다 임시 폴더에 압축을 풀기 때문에 시작이 1~3초 정도 느립니다. 빠르게 뜨는 쪽이 좋다면 `--onefile`을 빼고 빌드한 뒤 `dist\달력메모\` 폴더를 통째로 사용하세요. 폴더 방식은 백신 오탐지도 덜합니다.
+exe 하나로 묶은 빌드라서 실행할 때마다 임시 폴더에 압축을 풀고, 그래서 시작이 1~3초 정도 느립니다.
 
 ## 데이터와 로그 위치
 
@@ -78,6 +87,7 @@ Windows 탐색기는 아이콘을 캐시하므로, 바꾼 뒤에도 예전 아�
 | --- | --- |
 | 메모 | `%APPDATA%\CalendarNotes\notes.json` |
 | 로그 | `%APPDATA%\CalendarNotes\logs\calendar.log` |
+| 창 위치·설정 | 레지스트리 `HKEY_CURRENT_USER\Software\CalendarNotes` |
 
 메모는 exe 옆이 아니라 위 경로에 저장되므로, exe를 옮기거나 새로 빌드해도 데이터는 그대로입니다. 다른 PC로 옮기려면 `notes.json`만 복사하면 됩니다.
 
@@ -105,11 +115,39 @@ Windows 탐색기는 아이콘을 캐시하므로, 바꾼 뒤에도 예전 아�
 
 ## 문제 해결
 
-**`pyinstaller` 명령을 찾을 수 없다고 나올 때**
-pip 설치 폴더(`...\Python\...\Scripts`)가 PATH에 없어서 생기는 문제입니다. `python -m PyInstaller ...`처럼 실행하면 PATH와 상관없이 동작합니다.
-
 **exe를 실행해도 아무 반응 없이 꺼질 때**
-먼저 `%APPDATA%\CalendarNotes\logs\calendar.log`를 확인합니다. 로그 파일이 아예 없다면 앱이 시작되기 전에 실패한 것이므로, `--noconsole`을 빼고 다시 빌드해 실행하면 콘솔에 오류가 그대로 표시됩니다.
+먼저 `%APPDATA%\CalendarNotes\logs\calendar.log`를 확인합니다. 로그 파일이 아예 없다면 앱이 시작되기 전에 실패한 것입니다. `python calendar_notes.py`처럼 콘솔에서 실행해 보면 오류가 그대로 표시됩니다. 파일 이름을 `.py`로 복사해서 실행하면 됩니다.
 
 **Windows 시작 시 자동 실행**
 `Win + R` → `shell:startup`으로 폴더를 열고 exe의 바로가기를 넣습니다.
+
+## 삭제하기
+
+설치 과정이 없는 앱이라, 아래를 지우면 흔적이 남지 않습니다.
+
+1. `reimu-calendar.exe` 파일 (자동 실행에 넣었다면 `shell:startup`의 바로가기도)
+2. `%APPDATA%\CalendarNotes` 폴더 (메모와 로그)
+3. 레지스트리 `HKEY_CURRENT_USER\Software\CalendarNotes` 키 (창 위치와 설정)
+
+## Code Signing Policy
+
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+Release binaries are built from this repository by [GitHub Actions](.github/workflows/release.yml) and signed only after manual approval.
+
+| Role | Members |
+| --- | --- |
+| Committers and reviewers | [19GHYun](https://github.com/19GHYun) |
+| Approvers | [19GHYun](https://github.com/19GHYun) |
+
+### Privacy policy
+
+This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
+
+이 프로그램은 네트워크 통신을 하지 않습니다. 메모와 설정은 모두 이 PC 안(위 "데이터와 로그 위치")에만 저장됩니다.
+
+## License
+
+소스 코드는 [MIT License](LICENSE)로 배포합니다.
+
+아이콘 그림(`icon.png`, `app.ico`)은 동방 프로젝트의 하쿠레이 레이무 팬아트로, MIT License가 적용되지 않으며 권리는 원작자에게 있습니다.

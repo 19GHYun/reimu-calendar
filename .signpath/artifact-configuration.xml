@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath 프로젝트의 Artifact Configuration 에 그대로 붙여 넣는 설정.
+  GitHub Actions 가 올린 아티팩트(zip) 안의 reimu-calendar.exe 에 Authenticode 서명을 한다.
+  제품 이름·버전이 build.py 가 넣는 값과 다르면 서명을 거부한다 (SignPath Foundation 요구 사항).
+  version 은 워크플로(.github/workflows/release.yml)가 __version__ 값으로 넘겨준다.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="reimu-calendar.exe" product-name="Reimu Calendar" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

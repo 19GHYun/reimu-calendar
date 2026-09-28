@@ -1,0 +1,103 @@
+# v* 태그를 올리면 exe를 빌드하고 (SignPath 설정이 되어 있으면 서명한 뒤) 릴리스에 올린다.
+# 태그 없이 Actions 탭에서 수동 실행하면 빌드 결과만 아티팩트로 남긴다.
+#
+# SignPath 서명 설정 (Settings → Secrets and variables → Actions)
+#   Secret   SIGNPATH_API_TOKEN
+#   Variable SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG, SIGNPATH_SIGNING_POLICY_SLUG
+# SIGNPATH_API_TOKEN 이 없으면 서명 단계를 건너뛰고 서명 안 된 exe를 올린다.
+name: Build & Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 릴리스 생성
+  actions: read     # SignPath 가 아티팩트를 내려받을 때 필요
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt pyinstaller
+
+      - name: Check tag matches __version__
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          v="$(python build.py --print-version)"
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::태그($GITHUB_REF_NAME)와 calendar_notes.pyw 의 __version__($v)이 다릅니다."
+            exit 1
+          fi
+
+      - name: Build exe
+        id: build
+        shell: bash
+        run: |
+          python build.py
+          echo "version=$(python build.py --print-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload unsigned exe
+        id: upload-unsigned
+        uses: actions/upload-artifact@v7
+        with:
+          name: reimu-calendar-unsigned
+          path: dist/reimu-calendar.exe
+          if-no-files-found: error
+
+      - name: Sign with SignPath
+        if: env.SIGNPATH_API_TOKEN != ''
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600   # release-signing 은 SignPath 에서 직접 승인해야 함
+          output-artifact-directory: signed
+          parameters: |
+            version: "${{ steps.build.outputs.version }}"
+
+      - name: Pick release file
+        id: pick
+        shell: bash
+        run: |
+          if [ -f signed/reimu-calendar.exe ]; then
+            echo "file=signed/reimu-calendar.exe" >> "$GITHUB_OUTPUT"
+            echo "서명된 exe 사용"
+          else
+            echo "file=dist/reimu-calendar.exe" >> "$GITHUB_OUTPUT"
+            echo "::warning::SignPath 설정이 없어 서명 안 된 exe를 올립니다."
+          fi
+
+      - name: Upload final exe
+        uses: actions/upload-artifact@v7
+        with:
+          name: reimu-calendar
+          path: ${{ steps.pick.outputs.file }}
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${{ steps.pick.outputs.file }}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${{ steps.pick.outputs.file }}" \
+              --title "Reimu Calendar $GITHUB_REF_NAME" --generate-notes
+          fi

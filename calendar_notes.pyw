@@ -30,6 +30,8 @@ from datetime import date, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+__version__ = "1.0.1"  # build.py 가 exe 버전 정보로 사용, 릴리스 태그(v1.0.1)와 일치해야 함
+
 APP_NAME = "CalendarNotes"
 DATA_DIR = Path(os.environ.get("APPDATA") or (Path.home() / ".local" / "share")) / APP_NAME
 NOTES_FILE = DATA_DIR / "notes.json"

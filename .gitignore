@@ -1,0 +1,13 @@
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# make_icon.py 후보 이미지
+icon_options/

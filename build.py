@@ -59,10 +59,15 @@ def main() -> int:
     version_file.write_text(VERSION_TEMPLATE.format(
         vt=tuple(int(x) for x in version.split(".")) + (0,), version=version, product=PRODUCT,
         exe=EXE_NAME, exe_file=f"{EXE_NAME}.exe", copyright=COPYRIGHT), encoding="utf-8")
+    import holidays  # 공휴일: 한국 모듈은 동적으로 불러오고, 한국어 이름은 번역 파일(.mo)에 있음
+    sep = ";" if sys.platform == "win32" else ":"
+    kr_mo_dir = Path(holidays.__file__).parent / "locale" / "ko" / "LC_MESSAGES"
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--noconsole",
            "--name", EXE_NAME,
            "--icon", str(ICON),
-           "--add-data", f"{ICON}{';' if sys.platform == 'win32' else ':'}.",
+           "--add-data", f"{ICON}{sep}.",
+           "--hidden-import", "holidays.countries.south_korea",
+           "--add-data", f"{kr_mo_dir / 'KR.mo'}{sep}holidays/locale/ko/LC_MESSAGES",
            "--version-file", str(version_file),
            "--specpath", str(BUILD_DIR),
            str(SOURCE)]

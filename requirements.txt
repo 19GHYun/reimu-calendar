@@ -1,1 +1,2 @@
 PySide6>=6.5
+holidays>=0.60

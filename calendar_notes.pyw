@@ -6,31 +6,35 @@
 
   메모 저장 : %APPDATA%\\CalendarNotes\\notes.json   (입력 후 0.6초 뒤 자동 저장)
   로그 파일 : %APPDATA%\\CalendarNotes\\logs\\calendar.log
-  필요 패키지: pip install PySide6
+  필요 패키지: pip install -r requirements.txt   (PySide6, holidays)
 
 단축키
   Alt+←  / Alt+→   이전 달 / 다음 달   (마우스 휠도 가능)
   Ctrl+T           오늘로 이동
   Ctrl+S           즉시 저장
   더블클릭          해당 날짜 선택 후 바로 입력
-  우클릭            설정 메뉴 (메모 칸 자동 숨기기 / 배경 흐림)
+  우클릭            설정 메뉴 (자동 숨김 / 흐림 / 창 위치 / 자동 실행 / 종료)
 
 창에 마우스가 없고 다른 창을 쓰는 중이면 버튼·메모 칸이 숨고 달력만 보인다.
+닫기(×)는 트레이로 숨기기이고, 완전히 끄려면 트레이나 우클릭 메뉴의 '종료'.
+--autostart 로 실행하면(Windows 시작 시 자동 실행) 포커스를 뺏지 않고 달력만 띄운다.
 디버그 로그를 보려면 환경변수 CALENDAR_DEBUG=1 로 실행.
 """
 from __future__ import annotations
 
 import calendar
 import ctypes
+import getpass
 import json
 import logging
 import os
 import sys
+from ctypes import wintypes
 from datetime import date, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-__version__ = "1.0.1"  # build.py 가 exe 버전 정보로 사용, 릴리스 태그(v1.0.1)와 일치해야 함
+__version__ = "1.1.0"  # build.py 가 exe 버전 정보로 사용, 릴리스 태그(v1.1.0)와 일치해야 함
 
 APP_NAME = "CalendarNotes"
 DATA_DIR = Path(os.environ.get("APPDATA") or (Path.home() / ".local" / "share")) / APP_NAME
@@ -40,6 +44,7 @@ LOG_FILE = LOG_DIR / "calendar.log"
 # PyInstaller 빌드면 압축이 풀린 임시 폴더, 아니면 이 파일 옆
 RES_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 ICON_FILE = RES_DIR / "app.ico"
+INSTANCE_SERVER = f"{APP_NAME}-{getpass.getuser()}"  # 중복 실행 방지용 (사용자별)
 
 
 # ─────────────────────────────── 로깅 ───────────────────────────────
@@ -73,14 +78,22 @@ sys.excepthook = _excepthook
 try:
     from PySide6.QtCore import (QEvent, QRectF, QSettings, Qt, QtMsgType, QTimer, Signal,
                                 qInstallMessageHandler)
-    from PySide6.QtGui import (QColor, QCursor, QFont, QIcon, QKeySequence, QLinearGradient,
-                               QPainter, QPainterPath, QPen, QShortcut, QTextCursor)
+    from PySide6.QtGui import (QActionGroup, QColor, QCursor, QFont, QFontMetricsF, QIcon,
+                               QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen,
+                               QShortcut, QTextCursor)
+    from PySide6.QtNetwork import QLocalServer, QLocalSocket
     from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMainWindow, QMenu,
                                    QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy,
-                                   QSplitter, QVBoxLayout, QWidget)
+                                   QSplitter, QSystemTrayIcon, QVBoxLayout, QWidget)
 except ImportError:
     log.critical("PySide6 import 실패 — 'pip install PySide6' 필요", exc_info=True)
     raise SystemExit(1)
+
+try:
+    import holidays
+except ImportError:  # 공휴일 표시만 빠지고 나머지는 동작
+    holidays = None
+    log.warning("holidays 패키지 없음 — 공휴일 표시 안 함 ('pip install holidays')")
 
 _QT_LEVELS = {
     QtMsgType.QtDebugMsg: logging.DEBUG,
@@ -204,6 +217,108 @@ def apply_window_effects(hwnd: int, blur: bool) -> bool:
         return False
 
 
+# 창 위치(다른 창과의 앞뒤 관계)
+LAYER_NORMAL, LAYER_TOP, LAYER_BOTTOM = "normal", "top", "bottom"
+_HWND_TOPMOST, _HWND_NOTOPMOST, _HWND_BOTTOM = -1, -2, 1
+_SWP_NOSIZE, _SWP_NOMOVE, _SWP_NOZORDER, _SWP_NOACTIVATE = 0x1, 0x2, 0x4, 0x10
+_WM_WINDOWPOSCHANGING = 0x0046
+
+
+class _WindowPos(ctypes.Structure):
+    _fields_ = [("hwnd", ctypes.c_void_p), ("hwndInsertAfter", ctypes.c_void_p),
+                ("x", ctypes.c_int), ("y", ctypes.c_int), ("cx", ctypes.c_int), ("cy", ctypes.c_int),
+                ("flags", ctypes.c_uint)]
+
+
+def set_window_layer(hwnd: int, layer: str) -> None:
+    """항상 위 / 보통 / 맨 뒤로. '바탕화면 고정'은 이후 WM_WINDOWPOSCHANGING 에서 계속 맨 뒤로 붙잡는다."""
+    if sys.platform != "win32":
+        return
+    after = {LAYER_TOP: _HWND_TOPMOST, LAYER_BOTTOM: _HWND_BOTTOM}.get(layer, _HWND_NOTOPMOST)
+    try:
+        user32 = ctypes.windll.user32
+        if layer == LAYER_BOTTOM:  # 항상 위였다면 먼저 풀어야 맨 뒤로 갈 수 있음
+            user32.SetWindowPos(ctypes.c_void_p(hwnd), ctypes.c_void_p(_HWND_NOTOPMOST), 0, 0, 0, 0,
+                                _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE)
+        user32.SetWindowPos(ctypes.c_void_p(hwnd), ctypes.c_void_p(after), 0, 0, 0, 0,
+                            _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE)
+    except (AttributeError, OSError):
+        log.warning("창 위치 설정 실패: %s", layer, exc_info=True)
+
+
+# Windows 시작 시 자동 실행 (HKCU Run — 관리자 권한 불필요)
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_RUN_VALUE = "ReimuCalendar"
+AUTOSTART_ARG = "--autostart"
+
+
+def autostart_command() -> str:
+    if getattr(sys, "frozen", False):  # PyInstaller exe
+        return f'"{sys.executable}" {AUTOSTART_ARG}'
+    exe = Path(sys.executable)
+    pythonw = exe.with_name("pythonw.exe")  # 콘솔 창 없이
+    return f'"{pythonw if pythonw.exists() else exe}" "{Path(__file__).resolve()}" {AUTOSTART_ARG}'
+
+
+def get_autostart() -> str | None:
+    """등록된 명령줄, 없으면 None."""
+    if sys.platform != "win32":
+        return None
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
+            return winreg.QueryValueEx(k, _RUN_VALUE)[0]
+    except FileNotFoundError:
+        return None
+    except OSError:
+        log.warning("자동 실행 설정 읽기 실패", exc_info=True)
+        return None
+
+
+def set_autostart(enabled: bool) -> bool:
+    if sys.platform != "win32":
+        return False
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            if enabled:
+                winreg.SetValueEx(k, _RUN_VALUE, 0, winreg.REG_SZ, autostart_command())
+            else:
+                try:
+                    winreg.DeleteValue(k, _RUN_VALUE)
+                except FileNotFoundError:
+                    pass
+        log.info("자동 실행 %s", "등록" if enabled else "해제")
+        return True
+    except OSError:
+        log.exception("자동 실행 %s 실패", "등록" if enabled else "해제")
+        return False
+
+
+# ─────────────────────────────── 공휴일 ───────────────────────────────
+class KoreanHolidays:
+    """날짜 → 한국 공휴일 이름 (설·추석 연휴, 대체공휴일, 선거일 포함). 인터넷 없이 계산."""
+
+    def __init__(self):
+        self._kr = None
+        if holidays is None:
+            return
+        try:
+            self._kr = holidays.country_holidays("KR", language="ko")
+        except Exception:  # 번역 파일 누락 등 — 공휴일만 포기
+            log.exception("공휴일 데이터 초기화 실패")
+
+    def name(self, d: date) -> str:
+        if self._kr is None:
+            return ""
+        try:
+            return (self._kr.get(d) or "").replace("; ", ", ")
+        except Exception:
+            log.exception("공휴일 조회 실패: %s", d)
+            self._kr = None
+            return ""
+
+
 # ─────────────────────────────── 저장소 ───────────────────────────────
 class NoteStore:
     """날짜(YYYY-MM-DD) → 메모 텍스트. JSON 파일에 원자적으로 저장."""
@@ -294,9 +409,10 @@ class MonthView(QWidget):
     HEADER_H = 34
     RADIUS = 10
 
-    def __init__(self, store: NoteStore, parent=None):
+    def __init__(self, store: NoteStore, holidays: KoreanHolidays, parent=None):
         super().__init__(parent)
         self.store = store
+        self.holidays = holidays
         self._cal = calendar.Calendar(firstweekday=calendar.SUNDAY)
         today = date.today()
         self.year, self.month = today.year, today.month
@@ -364,6 +480,9 @@ class MonthView(QWidget):
         num_font.setPointSizeF(base.pointSizeF() * 1.05)
         note_font = QFont(base)
         note_font.setPointSizeF(base.pointSizeF() * 0.92)
+        hol_font = QFont(base)
+        hol_font.setPointSizeF(base.pointSizeF() * 0.85)
+        hol_metrics = QFontMetricsF(hol_font)
 
         # 요일 헤더
         p.setFont(head_font)
@@ -413,6 +532,7 @@ class MonthView(QWidget):
                 p.drawPath(sel)
                 p.setBrush(Qt.NoBrush)
 
+            holiday = self.holidays.name(d)
             nr = QRectF(r.left() + 7, r.top() + 6, 28, 28)
             p.setFont(num_font)
             if d == today:
@@ -422,11 +542,23 @@ class MonthView(QWidget):
                 p.setBrush(Qt.NoBrush)
                 p.setPen(QColor("#FFFFFF"))
             else:
-                col = QColor(SUN if wd == 6 else SAT if wd == 5 else INK)
+                col = QColor(SUN if wd == 6 or holiday else SAT if wd == 5 else INK)
                 if not in_month:
                     col.setAlpha(80)
                 p.setPen(col)
             p.drawText(nr, int(Qt.AlignCenter), str(d.day))
+
+            # 공휴일 이름 (숫자 옆, 칸이 좁으면 … 으로 줄임)
+            if holiday:
+                hr = QRectF(nr.right() + 3, nr.top(), r.right() - 20 - (nr.right() + 3), nr.height())
+                if hr.width() > 12:
+                    col = QColor(SUN)
+                    if not in_month:
+                        col.setAlpha(90)
+                    p.setFont(hol_font)
+                    p.setPen(col)
+                    p.drawText(hr, int(Qt.AlignLeft | Qt.AlignVCenter),
+                               hol_metrics.elidedText(holiday, Qt.ElideRight, hr.width()))
 
             text = self.store.get(d).strip()
             if text:
@@ -581,8 +713,14 @@ class MainWindow(QMainWindow):
         self.settings = QSettings(APP_NAME, APP_NAME)
         self.auto_hide = self.settings.value("autoHide", True, type=bool)
         self.blur = self.settings.value("blur", True, type=bool)
+        self.layer = self.settings.value("layer", LAYER_NORMAL, type=str)
+        if self.layer not in (LAYER_NORMAL, LAYER_TOP, LAYER_BOTTOM):
+            self.layer = LAYER_NORMAL
         self._compact = False
         self._split_state = None  # 메모 칸을 숨기기 직전의 분할 비율
+        self._pin_suspended = False  # 바탕화면 고정 중 트레이에서 불러와 잠깐 앞에 나온 상태
+        self._quitting = False       # True 면 닫기 = 종료, False 면 닫기 = 트레이로 숨기기
+        self.holidays = KoreanHolidays()
         self.setWindowTitle("달력 메모")
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -612,7 +750,7 @@ class MainWindow(QMainWindow):
         self.next_btn.setToolTip("다음 달 (Alt+→)")
         self.today_btn.setToolTip("오늘로 이동 (Ctrl+T)")
         self.min_btn.setToolTip("최소화")
-        self.close_btn.setToolTip("닫기")
+        self.close_btn.setToolTip("트레이로 숨기기 (완전히 끄려면 우클릭 → 종료)")
         for b in (self.today_btn, self.prev_btn, self.next_btn, self.min_btn, self.close_btn):
             b.setCursor(Qt.PointingHandCursor)
             b.setFocusPolicy(Qt.NoFocus)
@@ -632,7 +770,7 @@ class MainWindow(QMainWindow):
         self._chrome = [self.today_btn, self.prev_btn, self.next_btn, self.min_btn, self.close_btn]
 
         # 달력 + 메모 패널
-        self.view = MonthView(store)
+        self.view = MonthView(store, self.holidays)
         self.panel = panel = QWidget(objectName="editorPanel")
         panel.setAttribute(Qt.WA_StyledBackground, True)
         panel.setMinimumWidth(260)
@@ -691,6 +829,21 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+T"), self, activated=lambda: self.select_date(date.today()))
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self._save_now)
 
+        # 트레이 아이콘 (없는 환경이면 닫기 = 종료)
+        self.tray = None
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray = QSystemTrayIcon(self.windowIcon(), self)
+            self.tray.setToolTip("Reimu Calendar")
+            tray_menu = QMenu(self)
+            tray_menu.addAction("달력 열기", self.show_from_tray)
+            tray_menu.addSeparator()
+            tray_menu.addAction("종료", self.quit_app)
+            self.tray.setContextMenu(tray_menu)
+            self.tray.activated.connect(self._on_tray_activated)
+            self.tray.show()
+        else:
+            log.warning("시스템 트레이 없음 — 닫기를 누르면 종료")
+
         self._restore_layout()
         self.select_date(self.current)
         if store.readonly:
@@ -714,6 +867,26 @@ class MainWindow(QMainWindow):
         super().showEvent(e)
         self.root.blurred = apply_window_effects(int(self.winId()), self.blur)
         self.root.update()
+        if not self._pin_suspended:
+            set_window_layer(int(self.winId()), self.layer)
+
+    def set_layer(self, layer: str) -> None:
+        self.layer = layer
+        self._pin_suspended = False
+        self.settings.setValue("layer", layer)
+        set_window_layer(int(self.winId()), layer)
+        log.info("창 위치: %s", layer)
+
+    def nativeEvent(self, event_type, message):
+        # 바탕화면 고정: 클릭·활성화 등으로 앞에 나오려 할 때마다 맨 뒤로 되돌린다
+        if (self.layer == LAYER_BOTTOM and not self._pin_suspended
+                and bytes(event_type) == b"windows_generic_MSG"):
+            msg = wintypes.MSG.from_address(int(message))
+            if msg.message == _WM_WINDOWPOSCHANGING and msg.lParam:
+                pos = _WindowPos.from_address(msg.lParam)
+                if not pos.flags & _SWP_NOZORDER:
+                    pos.hwndInsertAfter = _HWND_BOTTOM
+        return super().nativeEvent(event_type, message)
 
     def _want_compact(self) -> bool:
         if not self.auto_hide or self.isMinimized():
@@ -752,6 +925,9 @@ class MainWindow(QMainWindow):
     def changeEvent(self, e) -> None:
         super().changeEvent(e)
         if e.type() == QEvent.ActivationChange:
+            if self._pin_suspended and not self.isActiveWindow():
+                self._pin_suspended = False  # 다 쓰고 다른 창으로 가면 다시 바탕화면으로
+                set_window_layer(int(self.winId()), self.layer)
             self._schedule_mode()
         elif e.type() == QEvent.WindowStateChange:
             self.root.update()  # 최대화 시 모서리 둥글기 변경
@@ -765,8 +941,30 @@ class MainWindow(QMainWindow):
         a_blur.setCheckable(True)
         a_blur.setChecked(self.blur)
         menu.addSeparator()
-        a_quit = menu.addAction("닫기")
+
+        layer_menu = menu.addMenu("창 위치")
+        group = QActionGroup(layer_menu)
+        layer_actions = {}
+        for layer, label in ((LAYER_NORMAL, "보통"),
+                             (LAYER_TOP, "항상 위"),
+                             (LAYER_BOTTOM, "바탕화면에 고정 (다른 창 뒤)")):
+            a = layer_menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(self.layer == layer)
+            group.addAction(a)
+            layer_actions[a] = layer
+
+        a_auto = None
+        if sys.platform == "win32":
+            a_auto = menu.addAction("Windows 시작 시 자동 실행")
+            a_auto.setCheckable(True)
+            a_auto.setChecked(get_autostart() is not None)
+        menu.addSeparator()
+        a_quit = menu.addAction("종료")
+
         chosen = menu.exec(e.globalPos())
+        if chosen is None:
+            return
         if chosen is a_hide:
             self.auto_hide = a_hide.isChecked()
             self.settings.setValue("autoHide", self.auto_hide)
@@ -776,8 +974,58 @@ class MainWindow(QMainWindow):
             self.settings.setValue("blur", self.blur)
             self.root.blurred = apply_window_effects(int(self.winId()), self.blur)
             self.root.update()
+        elif chosen in layer_actions:
+            self.set_layer(layer_actions[chosen])
+        elif chosen is a_auto:
+            if not set_autostart(a_auto.isChecked()):
+                QMessageBox.warning(self, "자동 실행", f"자동 실행 설정을 바꾸지 못했습니다.\n로그: {LOG_FILE}")
         elif chosen is a_quit:
-            self.close()
+            self.quit_app()
+
+    # ── 트레이 / 종료 ──
+    def _on_tray_activated(self, reason) -> None:
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self.show_from_tray()
+
+    def show_from_tray(self) -> None:
+        """트레이·중복 실행에서 불러올 때. 바탕화면 고정이어도 잠깐 앞으로 꺼내준다."""
+        if self.layer == LAYER_BOTTOM:
+            self._pin_suspended = True
+            set_window_layer(int(self.winId()), LAYER_NORMAL)
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def hide_to_tray(self) -> None:
+        if self.save_timer.isActive():
+            self._save_now()
+        self.hide()
+        if self.tray is not None and not self.settings.value("trayHintShown", False, type=bool):
+            self.tray.showMessage("Reimu Calendar",
+                                  "트레이로 숨겼습니다. 완전히 끄려면 이 아이콘을 우클릭 → 종료를 누르세요.",
+                                  self.windowIcon(), 5000)
+            self.settings.setValue("trayHintShown", True)
+
+    def quit_app(self) -> None:
+        self._quitting = True
+        if self.close():
+            QApplication.quit()
+        else:
+            self._quitting = False  # 저장 실패로 사용자가 종료를 취소함
+
+    def persist(self) -> None:
+        """메모·창 위치·분할 비율 저장 (종료 직전 / Windows 로그오프 시)."""
+        self.save_timer.stop()
+        if self.store.dirty:
+            self.store.save()
+        self.settings.setValue("geometry", self.saveGeometry())
+        split = self._split_state if self._compact else self.splitter.saveState()
+        if split is not None:
+            self.settings.setValue("splitter", split)
+        self.settings.sync()
 
     # ── 동작 ──
     def select_date(self, d: date) -> None:
@@ -793,6 +1041,9 @@ class MainWindow(QMainWindow):
         sub = f"{d.year}년 {WEEKDAY_FULL[d.weekday()]}"
         if d == date.today():
             sub += ", 오늘"
+        holiday = self.holidays.name(d)
+        if holiday:
+            sub += f" · {holiday}"
         self.date_sub.setText(sub)
         self._update_month_label()
 
@@ -830,6 +1081,10 @@ class MainWindow(QMainWindow):
             self.select_date(self.current)  # '오늘' 표기 갱신
 
     def closeEvent(self, e) -> None:
+        if not self._quitting and self.tray is not None:  # ×, Alt+F4 → 트레이로
+            e.ignore()
+            self.hide_to_tray()
+            return
         self.save_timer.stop()
         if self.store.dirty and not self.store.save():
             r = QMessageBox.question(
@@ -838,19 +1093,52 @@ class MainWindow(QMainWindow):
             if r != QMessageBox.Yes:
                 e.ignore()
                 return
-        self.settings.setValue("geometry", self.saveGeometry())
-        split = self._split_state if self._compact else self.splitter.saveState()
-        if split is not None:
-            self.settings.setValue("splitter", split)
+        self.persist()
+        if self.tray is not None:
+            self.tray.hide()
         log.info("창 닫힘")
         e.accept()
+
+
+def notify_running_instance() -> bool:
+    """이미 실행 중인 창이 있으면 그 창을 불러오라고 알리고 True."""
+    sock = QLocalSocket()
+    sock.connectToServer(INSTANCE_SERVER)
+    if not sock.waitForConnected(500):
+        return False
+    sock.write(b"show\n")
+    sock.waitForBytesWritten(500)
+    sock.disconnectFromServer()
+    return True
+
+
+def start_instance_server(win: MainWindow) -> QLocalServer:
+    server = QLocalServer(win)
+    QLocalServer.removeServer(INSTANCE_SERVER)  # 비정상 종료로 남은 이름 정리 (Windows 에선 영향 없음)
+    if not server.listen(INSTANCE_SERVER):
+        log.warning("중복 실행 감지 서버 시작 실패: %s", server.errorString())
+
+    def on_connection():
+        conn = server.nextPendingConnection()
+        if conn is not None:
+            conn.disconnected.connect(conn.deleteLater)
+            log.info("다른 실행 요청 → 기존 창 표시")
+            win.show_from_tray()
+
+    server.newConnection.connect(on_connection)
+    return server
 
 
 def main() -> int:
     qInstallMessageHandler(_qt_message_handler)
     set_app_user_model_id()
+    autostarted = AUTOSTART_ARG in sys.argv
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    if notify_running_instance():
+        log.info("이미 실행 중 — 기존 창을 불러오고 종료")
+        return 0
+    app.setQuitOnLastWindowClosed(False)  # 창을 트레이로 숨겨도 계속 실행
     if ICON_FILE.exists():
         app.setWindowIcon(QIcon(str(ICON_FILE)))
     else:
@@ -858,12 +1146,25 @@ def main() -> int:
     app.setStyle("Fusion")
     app.setFont(QFont("Malgun Gothic", 10))
     app.setStyleSheet(STYLE)
-    log.info("시작 — 데이터 파일: %s", NOTES_FILE)
+    log.info("시작 v%s%s — 데이터 파일: %s", __version__, " (자동 실행)" if autostarted else "", NOTES_FILE)
+
+    # exe 를 옮겼으면 자동 실행에 등록된 경로도 지금 위치로 갱신
+    registered = get_autostart()
+    if registered is not None and registered != autostart_command():
+        log.info("자동 실행 경로 갱신: %s → %s", registered, autostart_command())
+        set_autostart(True)
 
     store = NoteStore(NOTES_FILE)
     store.load()
     win = MainWindow(store)
+    start_instance_server(win)  # 창이 부모라 창과 같이 유지됨
+    app.aboutToQuit.connect(win.persist)
+    app.commitDataRequest.connect(lambda _m: win.persist())  # Windows 로그오프/종료
+    if autostarted:  # 부팅 직후엔 포커스를 뺏지 않고 달력만
+        win.setAttribute(Qt.WA_ShowWithoutActivating, True)
     win.show()
+    if autostarted:
+        win._apply_mode()
     if store.problem:
         QTimer.singleShot(0, lambda: QMessageBox.warning(win, "메모 파일 문제", store.problem))
     rc = app.exec()

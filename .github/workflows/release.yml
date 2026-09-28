@@ -21,6 +21,7 @@ jobs:
     runs-on: windows-latest
     env:
       SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+      PYTHONUTF8: "1"   # 러너 콘솔(cp1252)에서도 한글 출력이 깨지거나 멈추지 않게
     steps:
       - uses: actions/checkout@v7
 
